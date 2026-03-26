@@ -83,8 +83,6 @@ def init_state() -> None:
         "original_image": None,
         "image_name": None,
         "status_message": "Ready to edit images!",
-        "last_basic_settings": BasicSettings(0, 0, 0, 0),
-        "last_rotation": 0,
         "uploader_signature": None,
         "brightness": 0,
         "contrast": 0,
@@ -114,8 +112,6 @@ def reset_controls() -> None:
     st.session_state.saturation = 0
     st.session_state.sharpness = 0
     st.session_state.rotation = 0
-    st.session_state.last_basic_settings = BasicSettings(0, 0, 0, 0)
-    st.session_state.last_rotation = 0
 
 
 def load_uploaded_image(uploaded_file) -> None:
@@ -148,6 +144,48 @@ def require_image() -> bool:
         st.warning("Please load an image first!")
         return False
     return True
+
+
+def refresh_after_edit() -> None:
+    st.rerun()
+
+
+def build_preview_image(image: Image.Image | None) -> Image.Image | None:
+    if image is None:
+        return None
+
+    settings = BasicSettings(
+        st.session_state.brightness,
+        st.session_state.contrast,
+        st.session_state.saturation,
+        st.session_state.sharpness,
+    )
+    preview = image.copy()
+    preview = ImageEnhance.Brightness(preview).enhance(1.0 + settings.brightness / 100.0)
+    preview = ImageEnhance.Contrast(preview).enhance(1.0 + settings.contrast / 100.0)
+    preview = ImageEnhance.Color(preview).enhance(1.0 + settings.saturation / 100.0)
+    preview = ImageEnhance.Sharpness(preview).enhance(1.0 + settings.sharpness / 100.0)
+
+    angle = int(st.session_state.rotation)
+    if angle:
+        preview = preview.rotate(angle, expand=True)
+
+    return preview
+
+
+def get_display_image() -> Image.Image | None:
+    return build_preview_image(get_current_image())
+
+
+def commit_display_image(message: str) -> Image.Image | None:
+    image = get_display_image()
+    if image is None:
+        return None
+
+    st.session_state.current_image = image
+    reset_controls()
+    set_status(message)
+    return image
 
 
 def pil_to_download_bytes(image: Image.Image) -> tuple[bytes, str, str]:
@@ -191,52 +229,11 @@ def invert_image(image: Image.Image) -> Image.Image:
     return ImageOps.invert(rgb_image(image))
 
 
-def apply_basic_adjustments_to_original(settings: BasicSettings) -> None:
-    original = get_original_image()
-    if original is None:
-        return
-
-    image = original.copy()
-    image = ImageEnhance.Brightness(image).enhance(1.0 + settings.brightness / 100.0)
-    image = ImageEnhance.Contrast(image).enhance(1.0 + settings.contrast / 100.0)
-    image = ImageEnhance.Color(image).enhance(1.0 + settings.saturation / 100.0)
-    image = ImageEnhance.Sharpness(image).enhance(1.0 + settings.sharpness / 100.0)
-    st.session_state.current_image = image
-
-
-def apply_rotation_to_original(angle: int) -> None:
-    original = get_original_image()
-    if original is None:
-        return
-    st.session_state.current_image = original.copy().rotate(angle, expand=True)
-
-
-def apply_slider_changes() -> None:
-    original = get_original_image()
-    if original is None:
-        return
-
-    current_basic = BasicSettings(
-        st.session_state.brightness,
-        st.session_state.contrast,
-        st.session_state.saturation,
-        st.session_state.sharpness,
-    )
-    if current_basic != st.session_state.last_basic_settings:
-        apply_basic_adjustments_to_original(current_basic)
-        st.session_state.last_basic_settings = current_basic
-
-    current_rotation = int(st.session_state.rotation)
-    if current_rotation != st.session_state.last_rotation:
-        apply_rotation_to_original(current_rotation)
-        st.session_state.last_rotation = current_rotation
-
-
 def apply_filter(filter_name: str) -> None:
     if not require_image():
         return
 
-    image = get_current_image()
+    image = get_display_image()
     try:
         if filter_name == "Blur":
             image = image.filter(ImageFilter.BLUR)
@@ -258,6 +255,7 @@ def apply_filter(filter_name: str) -> None:
             image = image.filter(ImageFilter.CONTOUR)
 
         st.session_state.current_image = image
+        reset_controls()
         set_status(f"Applied filter: {filter_name}")
     except Exception as exc:
         st.error(f"Failed to apply filter: {exc}")
@@ -283,7 +281,7 @@ def apply_color_effect(effect_name: str) -> None:
     if not require_image():
         return
 
-    image = get_current_image()
+    image = get_display_image()
     try:
         if effect_name == "Grayscale":
             image = ImageOps.grayscale(image)
@@ -301,6 +299,7 @@ def apply_color_effect(effect_name: str) -> None:
             image = ImageOps.autocontrast(rgb_image(image))
 
         st.session_state.current_image = image
+        reset_controls()
         set_status(f"Applied effect: {effect_name}")
     except Exception as exc:
         st.error(f"Failed to apply effect: {exc}")
@@ -311,7 +310,7 @@ def apply_edge_detection(method: str) -> None:
         return
 
     try:
-        img_array = np.array(get_current_image().convert("L"))
+        img_array = np.array(get_display_image().convert("L"))
         if method == "Sobel":
             sobelx = cv2.Sobel(img_array, cv2.CV_64F, 1, 0, ksize=5)
             sobely = cv2.Sobel(img_array, cv2.CV_64F, 0, 1, ksize=5)
@@ -330,6 +329,7 @@ def apply_edge_detection(method: str) -> None:
             edges = filters.roberts(img_array)
 
         st.session_state.current_image = Image.fromarray(normalize_to_uint8(edges))
+        reset_controls()
         set_status(f"Applied edge detection: {method}")
     except Exception as exc:
         st.error(f"Failed to apply edge detection: {exc}")
@@ -340,7 +340,7 @@ def apply_denoising(method: str) -> None:
         return
 
     try:
-        image = get_current_image()
+        image = get_display_image()
         img_array = np.array(image)
         color_image = len(img_array.shape) == 3 and img_array.shape[2] >= 3
 
@@ -356,6 +356,7 @@ def apply_denoising(method: str) -> None:
             denoised = cv2.fastNlMeansDenoising(img_array, None, 10, 7, 21)
 
         st.session_state.current_image = Image.fromarray(denoised)
+        reset_controls()
         set_status(f"Applied denoising: {method}")
     except Exception as exc:
         st.error(f"Failed to apply denoising: {exc}")
@@ -366,7 +367,7 @@ def apply_morphological(operation: str) -> None:
         return
 
     try:
-        img_array = np.array(get_current_image().convert("L"))
+        img_array = np.array(get_display_image().convert("L"))
         kernel = np.ones((5, 5), np.uint8)
 
         if operation == "Erosion":
@@ -379,6 +380,7 @@ def apply_morphological(operation: str) -> None:
             result = cv2.morphologyEx(img_array, cv2.MORPH_CLOSE, kernel)
 
         st.session_state.current_image = Image.fromarray(result)
+        reset_controls()
         set_status(f"Applied morphological operation: {operation}")
     except Exception as exc:
         st.error(f"Failed to apply morphological operation: {exc}")
@@ -389,7 +391,7 @@ def auto_enhance() -> None:
         return
 
     try:
-        img_array = np.array(get_current_image())
+        img_array = np.array(get_display_image())
         if len(img_array.shape) == 3:
             lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
             lightness, channel_a, channel_b = cv2.split(lab)
@@ -405,6 +407,7 @@ def auto_enhance() -> None:
             enhanced = cv2.addWeighted(img_array, 1.5, enhanced, -0.5, 0)
 
         st.session_state.current_image = Image.fromarray(enhanced)
+        reset_controls()
         set_status("Applied advanced auto-enhancement")
     except Exception as exc:
         st.error(f"Failed to apply auto-enhance: {exc}")
@@ -415,7 +418,7 @@ def super_resolution(scale: int) -> None:
         return
 
     try:
-        img_array = np.array(get_current_image())
+        img_array = np.array(get_display_image())
         new_width = int(img_array.shape[1] * scale)
         new_height = int(img_array.shape[0] * scale)
         interpolation = cv2.INTER_LANCZOS4 if len(img_array.shape) == 3 else cv2.INTER_CUBIC
@@ -424,6 +427,7 @@ def super_resolution(scale: int) -> None:
         upscaled = cv2.filter2D(upscaled, -1, kernel)
 
         st.session_state.current_image = Image.fromarray(upscaled)
+        reset_controls()
         set_status(f"Upscaled image by {scale}x")
     except Exception as exc:
         st.error(f"Failed to apply super resolution: {exc}")
@@ -443,7 +447,7 @@ def style_transfer(style: str) -> None:
         return
 
     try:
-        img_array = np.array(rgb_image(get_current_image()))
+        img_array = np.array(rgb_image(get_display_image()))
 
         if style == "Warm":
             img_array = img_array.astype(np.float32)
@@ -469,6 +473,7 @@ def style_transfer(style: str) -> None:
             img_array = np.array(image)
 
         st.session_state.current_image = Image.fromarray(img_array.astype(np.uint8))
+        reset_controls()
         set_status(f"Applied {style} style")
     except Exception as exc:
         st.error(f"Failed to apply style transfer: {exc}")
@@ -479,7 +484,7 @@ def blur_faces() -> None:
         return
 
     try:
-        img_array = np.array(rgb_image(get_current_image()))
+        img_array = np.array(rgb_image(get_display_image()))
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
         profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
@@ -506,6 +511,7 @@ def blur_faces() -> None:
             )
 
         st.session_state.current_image = Image.fromarray(img_array)
+        reset_controls()
         set_status(f"Blurred {len(all_faces)} faces")
     except Exception as exc:
         st.error(f"Failed to blur faces: {exc}")
@@ -516,7 +522,7 @@ def cartoon_effect() -> None:
         return
 
     try:
-        img_array = np.array(rgb_image(get_current_image()))
+        img_array = np.array(rgb_image(get_display_image()))
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         filtered = cv2.bilateralFilter(img_array, 9, 75, 75)
         edges = cv2.adaptiveThreshold(
@@ -531,6 +537,7 @@ def cartoon_effect() -> None:
         cartoon = cv2.bitwise_and(filtered, edges)
 
         st.session_state.current_image = Image.fromarray(cartoon)
+        reset_controls()
         set_status("Applied cartoon effect")
     except Exception as exc:
         st.error(f"Failed to apply cartoon effect: {exc}")
@@ -541,7 +548,7 @@ def remove_background() -> None:
         return
 
     try:
-        img_array = np.array(rgb_image(get_current_image()))
+        img_array = np.array(rgb_image(get_display_image()))
         hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
         lower_bound = np.array([0, 0, 0])
         upper_bound = np.array([180, 255, 200])
@@ -554,6 +561,7 @@ def remove_background() -> None:
         rgba[:, :, 3] = mask
 
         st.session_state.current_image = Image.fromarray(rgba)
+        reset_controls()
         set_status("Applied background removal (simple)")
     except Exception as exc:
         st.error(f"Failed to remove background: {exc}")
@@ -576,7 +584,7 @@ def render_toolbar() -> None:
     with toolbar_columns[0]:
         st.write("Upload an image to start editing.")
     with toolbar_columns[1]:
-        image = get_current_image()
+        image = get_display_image()
         if image is not None:
             data, filename, mime = pil_to_download_bytes(image)
             st.download_button("Save Image", data=data, file_name=filename, mime=mime, use_container_width=True)
@@ -591,7 +599,7 @@ def render_toolbar() -> None:
 
 
 def render_preview() -> None:
-    image = get_current_image()
+    image = get_display_image()
     st.markdown('<div class="editor-card">', unsafe_allow_html=True)
     if image is None:
         st.info("No image loaded. Upload an image to start editing.")
@@ -618,10 +626,12 @@ def render_filters_tab(tab) -> None:
         st.selectbox("Image Filters", FILTER_OPTIONS, key="filter_name")
         if st.button("Apply Filter", use_container_width=True):
             apply_filter(st.session_state.filter_name)
+            refresh_after_edit()
 
         st.selectbox("Color Effects", EFFECT_OPTIONS, key="effect_name")
         if st.button("Apply Effect", use_container_width=True):
             apply_color_effect(st.session_state.effect_name)
+            refresh_after_edit()
 
 
 def render_advanced_tab(tab) -> None:
@@ -629,37 +639,46 @@ def render_advanced_tab(tab) -> None:
         st.selectbox("Edge Detection", EDGE_OPTIONS, key="edge_method")
         if st.button("Detect Edges", use_container_width=True):
             apply_edge_detection(st.session_state.edge_method)
+            refresh_after_edit()
 
         st.selectbox("Noise Reduction", DENOISE_OPTIONS, key="denoise_method")
         if st.button("Remove Noise", use_container_width=True):
             apply_denoising(st.session_state.denoise_method)
+            refresh_after_edit()
 
         st.selectbox("Morphological Operations", MORPH_OPTIONS, key="morph_operation")
         if st.button("Apply Operation", use_container_width=True):
             apply_morphological(st.session_state.morph_operation)
+            refresh_after_edit()
 
 
 def render_ai_tab(tab) -> None:
     with tab:
         if st.button("Auto Enhance", use_container_width=True):
             auto_enhance()
+            refresh_after_edit()
 
         st.slider("Super Resolution Scale", 2, 4, key="sr_scale")
         if st.button("Super Resolution", use_container_width=True):
             super_resolution(st.session_state.sr_scale)
+            refresh_after_edit()
 
         st.selectbox("Style Transfer", STYLE_OPTIONS, key="style_name")
         if st.button("Apply Style", use_container_width=True):
             style_transfer(st.session_state.style_name)
+            refresh_after_edit()
 
         if st.button("Blur Faces", use_container_width=True):
             blur_faces()
+            refresh_after_edit()
 
         if st.button("Cartoon Effect", use_container_width=True):
             cartoon_effect()
+            refresh_after_edit()
 
         if st.button("Remove Background", use_container_width=True):
             remove_background()
+            refresh_after_edit()
 
 
 def render_controls() -> None:
@@ -677,7 +696,6 @@ def main() -> None:
     init_state()
     render_header()
     render_toolbar()
-    apply_slider_changes()
 
     preview_column, controls_column = st.columns([7, 3], gap="large")
     with preview_column:
